@@ -53,7 +53,18 @@ export async function POST(req: Request) {
     return Response.json({ error: "Missing goal or budget" }, { status: 400 });
   }
 
-  const candidates = await gatherCandidates(profile.goal, profile.budget);
+  // Clear, logged failure if the AI key is missing (the usual cause of a 500
+  // on a fresh deploy — set ANTHROPIC_API_KEY in the Vercel project env).
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error("[coach] ANTHROPIC_API_KEY is not set in this environment");
+    return Response.json(
+      { error: "The AI coach isn't configured on the server yet (missing API key)." },
+      { status: 503 },
+    );
+  }
+
+  try {
+    const candidates = await gatherCandidates(profile.goal, profile.budget);
   if (candidates.length === 0) {
     return Response.json(
       { error: `No products available under ${CURRENCY} ${profile.budget}. Try a higher budget.` },
@@ -161,4 +172,11 @@ Design the best stack for this customer within budget.`;
     overBudget: total > profile.budget,
     cartUrl,
   });
+  } catch (err) {
+    console.error("[coach] failed to build stack:", err);
+    return Response.json(
+      { error: "Coach couldn't build your stack right now. Please try again." },
+      { status: 500 },
+    );
+  }
 }
