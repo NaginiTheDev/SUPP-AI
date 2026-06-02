@@ -11,9 +11,9 @@ import {
   type Diet,
   type FocusArea,
 } from "@/lib/profile";
-import { StackResult, type CoachResult } from "./StackResult";
+import { StackResult, StackHeader, type CoachResult } from "./StackResult";
 
-export type CoachPhase = "form" | "loading" | "result" | "error";
+export type CoachPhase = "form" | "loading" | "building" | "result" | "error";
 type Status = CoachPhase;
 
 const STEPS = ["Goal", "About you", "Training", "Lifestyle", "Budget"] as const;
@@ -39,6 +39,7 @@ export function CoachPanel({
   const [step, setStep] = useState(0);
   const [status, setStatus] = useState<Status>("form");
   const [result, setResult] = useState<CoachResult | null>(null);
+  const [partialHeader, setPartialHeader] = useState<{ stackName: string; summary: string } | null>(null);
   const [error, setError] = useState<string>("");
   const [p, setP] = useState<Partial<CustomerProfile>>({ ...DEFAULT });
 
@@ -60,18 +61,48 @@ export function CoachPanel({
   async function generate() {
     setStatus("loading");
     setError("");
+    setPartialHeader(null);
+    setResult(null);
     try {
       const res = await fetch("/api/coach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(p),
       });
+      // Non-streamed early errors (missing key, no candidates) come back as JSON.
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || `Something went wrong (${res.status})`);
       }
-      setResult((await res.json()) as CoachResult);
-      setStatus("result");
+      if (!res.body) throw new Error("No response stream");
+
+      // Read the NDJSON stream: `header` first (shows immediately), then `result`.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx = buf.indexOf("\n");
+        while (idx >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (line) {
+            const msg = JSON.parse(line);
+            if (msg.type === "header") {
+              setPartialHeader({ stackName: msg.stackName, summary: msg.summary });
+              setStatus("building");
+            } else if (msg.type === "result") {
+              setResult(msg as CoachResult);
+              setStatus("result");
+            } else if (msg.type === "error") {
+              throw new Error(msg.error || "Failed to build your stack");
+            }
+          }
+          idx = buf.indexOf("\n");
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to build your stack");
       setStatus("error");
@@ -82,6 +113,7 @@ export function CoachPanel({
     setP({ ...DEFAULT });
     setStep(0);
     setResult(null);
+    setPartialHeader(null);
     setStatus("form");
   }
 
@@ -90,6 +122,34 @@ export function CoachPanel({
   const inner =
     status === "result" && result ? (
       <StackResult result={result} onRestart={restart} />
+    ) : status === "building" && partialHeader ? (
+      <div className="flex h-full flex-col">
+        <StackHeader stackName={partialHeader.stackName} summary={partialHeader.summary} />
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          <p className="mb-3 flex items-center gap-2 text-xs font-semibold text-zinc-400">
+            <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-600 border-t-lime-400" />
+            Assembling your stack…
+          </p>
+          <ul className="grid gap-2.5 sm:grid-cols-2">
+            {[0, 1, 2, 3].map((i) => (
+              <li
+                key={i}
+                style={{ animationDelay: `${i * 70}ms` }}
+                className="rise-in rounded-2xl border border-zinc-800 bg-zinc-900/60 p-3"
+              >
+                <div className="flex gap-3">
+                  <div className="h-20 w-20 shrink-0 animate-pulse rounded-xl bg-zinc-800" />
+                  <div className="flex-1 space-y-2 py-1">
+                    <div className="h-3 w-16 animate-pulse rounded bg-zinc-800" />
+                    <div className="h-3.5 w-3/4 animate-pulse rounded bg-zinc-800" />
+                    <div className="h-3 w-1/2 animate-pulse rounded bg-zinc-800" />
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
     ) : status === "loading" ? (
       <div className="flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
         <div className="relative h-16 w-16">
@@ -344,10 +404,15 @@ export function CoachPanel({
       </div>
     );
 
-  const wide = status === "result";
+  // Card is wide for the whole build→deliver sequence so it expands once and the
+  // streamed header + items fill in without another resize.
+  const wide = status === "loading" || status === "building" || status === "result";
+  // Group building + result under one key so the streamed header stays mounted
+  // (no re-fade) while the skeleton swaps to the real item cards.
+  const phaseKey = status === "building" || status === "result" ? "stack" : status;
   return (
     <Shell wide={wide}>
-      <div key={status} className="phase-enter h-full">
+      <div key={phaseKey} className="phase-enter h-full">
         {inner}
       </div>
     </Shell>

@@ -1,5 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { generateText, Output } from "ai";
+import { streamText, Output } from "ai";
 import { z } from "zod";
 import {
   gatherCandidates,
@@ -111,69 +111,111 @@ ${candidateList}
 
 Design the best stack for this customer within budget.`;
 
-  const { output } = await generateText({
+  const result = streamText({
     model: anthropic("claude-sonnet-4-6"),
     system,
     prompt,
     output: Output.object({ schema: StackSchema }),
   });
 
-  // Validate the AI's picks against the real candidate set + recompute totals.
-  const allowed = new Map(candidates.map((c) => [c.variantId, c]));
-  const chosen = output.items.filter((i) => allowed.has(i.variantId));
-  const resolved = await getVariants(chosen.map((i) => i.variantId));
-  const byId = new Map(resolved.map((it) => [it.variantId, it]));
+  // Stream NDJSON: a `header` line the moment the summary is done (the model
+  // writes stackName + summary before it starts the items array), then a
+  // `result` line with the validated, enriched, budget-checked stack.
+  const encoder = new TextEncoder();
+  const send = (c: ReadableStreamDefaultController, obj: unknown) =>
+    c.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
 
-  const allLines = chosen
-    .map((i) => {
-      const it = byId.get(i.variantId);
-      if (!it) return null;
-      const quantity = Math.max(1, Math.min(3, Math.floor(i.quantity || 1)));
-      return {
-        variantId: it.variantId,
-        title: it.title,
-        vendor: it.vendor,
-        category: it.category,
-        unitPrice: it.price,
-        compareAtPrice: it.compareAtPrice,
-        quantity,
-        lineTotal: it.price * quantity,
-        reason: i.reason,
-        dosage: i.dosage,
-        description: it.description,
-        image: it.image,
-        url: it.url,
-      };
-    })
-    .filter((x): x is NonNullable<typeof x> => x !== null);
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        let headerSent = false;
+        for await (const partial of result.partialOutputStream) {
+          if (!headerSent && partial?.stackName && partial?.summary && partial.items !== undefined) {
+            send(controller, { type: "header", stackName: partial.stackName, summary: partial.summary });
+            headerSent = true;
+          }
+        }
 
-  // Hard budget guard (deterministic): always keep the lead/foundational item,
-  // then add subsequent items in the AI's priority order only while they fit.
-  const lines: typeof allLines = [];
-  let running = 0;
-  for (const l of allLines) {
-    if (lines.length === 0 || running + l.lineTotal <= profile.budget) {
-      lines.push(l);
-      running += l.lineTotal;
-    }
-  }
+        const output = await result.output;
+        if (!headerSent) {
+          send(controller, { type: "header", stackName: output.stackName, summary: output.summary });
+        }
 
-  const total = lines.reduce((s, l) => s + l.lineTotal, 0);
-  const cartUrl = buildCartPermalink(
-    lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity })),
-  );
+        // Validate the AI's picks against the real candidate set + recompute totals.
+        const allowed = new Map(candidates.map((c) => [c.variantId, c]));
+        const chosen = output.items.filter((i) => allowed.has(i.variantId));
+        const resolved = await getVariants(chosen.map((i) => i.variantId));
+        const byId = new Map(resolved.map((it) => [it.variantId, it]));
 
-  return Response.json({
-    stackName: output.stackName,
-    summary: output.summary,
-    tips: output.tips,
-    currency: CURRENCY,
-    lines,
-    total,
-    itemCount: lines.length,
-    budget: profile.budget,
-    overBudget: total > profile.budget,
-    cartUrl,
+        const allLines = chosen
+          .map((i) => {
+            const it = byId.get(i.variantId);
+            if (!it) return null;
+            const quantity = Math.max(1, Math.min(3, Math.floor(i.quantity || 1)));
+            return {
+              variantId: it.variantId,
+              title: it.title,
+              vendor: it.vendor,
+              category: it.category,
+              unitPrice: it.price,
+              compareAtPrice: it.compareAtPrice,
+              quantity,
+              lineTotal: it.price * quantity,
+              reason: i.reason,
+              dosage: i.dosage,
+              description: it.description,
+              image: it.image,
+              url: it.url,
+            };
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+
+        // Hard budget guard (deterministic): always keep the lead/foundational
+        // item, then add subsequent items in priority order only while they fit.
+        const lines: typeof allLines = [];
+        let running = 0;
+        for (const l of allLines) {
+          if (lines.length === 0 || running + l.lineTotal <= profile.budget) {
+            lines.push(l);
+            running += l.lineTotal;
+          }
+        }
+
+        const total = lines.reduce((s, l) => s + l.lineTotal, 0);
+        const cartUrl = buildCartPermalink(
+          lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity })),
+        );
+
+        send(controller, {
+          type: "result",
+          stackName: output.stackName,
+          summary: output.summary,
+          tips: output.tips,
+          currency: CURRENCY,
+          lines,
+          total,
+          itemCount: lines.length,
+          budget: profile.budget,
+          overBudget: total > profile.budget,
+          cartUrl,
+        });
+        controller.close();
+      } catch (err) {
+        console.error("[coach] failed to build stack:", err);
+        send(controller, {
+          type: "error",
+          error: "Coach couldn't build your stack right now. Please try again.",
+        });
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store",
+    },
   });
   } catch (err) {
     console.error("[coach] failed to build stack:", err);

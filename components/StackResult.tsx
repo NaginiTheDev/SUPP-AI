@@ -35,6 +35,20 @@ function money(c: string, n: number) {
   return `${c} ${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 }
 
+// The gradient header — shared by the final result and the "building" state so
+// the header can appear (streamed) before the item cards finish loading.
+export function StackHeader({ stackName, summary }: { stackName: string; summary: string }) {
+  return (
+    <div className="border-b border-zinc-800 bg-gradient-to-br from-lime-400 to-emerald-500 px-6 py-5">
+      <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-950/70">
+        Your AI-built stack
+      </p>
+      <h2 className="text-2xl font-black text-emerald-950">{stackName}</h2>
+      <p className="mt-1 text-sm font-medium leading-snug text-emerald-950/80">{summary}</p>
+    </div>
+  );
+}
+
 export function StackResult({
   result,
   onRestart,
@@ -46,13 +60,7 @@ export function StackResult({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-zinc-800 bg-gradient-to-br from-lime-400 to-emerald-500 px-6 py-5">
-        <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-950/70">
-          Your AI-built stack
-        </p>
-        <h2 className="text-2xl font-black text-emerald-950">{result.stackName}</h2>
-        <p className="mt-1 text-sm font-medium leading-snug text-emerald-950/80">{result.summary}</p>
-      </div>
+      <StackHeader stackName={result.stackName} summary={result.summary} />
 
       <div className="flex-1 overflow-y-auto px-4 py-4">
         <ul className="grid gap-2.5 sm:grid-cols-2">

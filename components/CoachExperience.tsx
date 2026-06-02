@@ -9,7 +9,7 @@ import { CoachPanel, type CoachPhase } from "./CoachPanel";
 export function CoachExperience() {
   const [phase, setPhase] = useState<CoachPhase>("form");
   const onPhaseChange = useCallback((ph: CoachPhase) => setPhase(ph), []);
-  const expanded = phase === "loading" || phase === "result";
+  const expanded = phase === "loading" || phase === "building" || phase === "result";
 
   return (
     <div
