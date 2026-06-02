@@ -54,9 +54,9 @@ export async function POST(req: Request) {
   }
 
   // Accept the conventional ANTHROPIC_API_KEY or a lowercase `anthropic` var.
-  // Clear, logged failure if neither is set (the usual cause of a 500 on a
-  // fresh deploy — set one of these in the Vercel project env).
-  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.anthropic;
+  // Strip any whitespace/newlines that got pasted into the env value — a stray
+  // newline makes it an invalid HTTP header value and throws inside the SDK.
+  const apiKey = (process.env.ANTHROPIC_API_KEY || process.env.anthropic || "").replace(/\s+/g, "");
   if (!apiKey) {
     console.error("[coach] No Anthropic API key set (ANTHROPIC_API_KEY or anthropic)");
     return Response.json(
@@ -177,10 +177,8 @@ Design the best stack for this customer within budget.`;
   });
   } catch (err) {
     console.error("[coach] failed to build stack:", err);
-    // TEMP: surface the real cause to the client for deploy debugging.
-    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     return Response.json(
-      { error: "Coach couldn't build your stack right now. Please try again.", detail },
+      { error: "Coach couldn't build your stack right now. Please try again." },
       { status: 500 },
     );
   }
