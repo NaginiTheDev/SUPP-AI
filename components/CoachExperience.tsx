@@ -19,11 +19,14 @@ export function CoachExperience() {
           : "gap-10 lg:[grid-template-columns:1fr_1fr]"
       }`}
     >
-      {/* Pitch — collapses + fades out when the panel expands */}
+      {/* Pitch — collapses + fades out when the panel expands. overflow-hidden
+          clips the horizontal reflow as the column shrinks; max-h-0 (expanded
+          only) stops that reflow from inflating the grid row and pushing the
+          panel down. The starting (non-expanded) state is unconstrained. */}
       <div
         aria-hidden={expanded}
-        className={`order-2 transition-all duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] lg:order-1 ${
-          expanded ? "overflow-hidden opacity-0 lg:-translate-x-10" : "opacity-100"
+        className={`order-2 overflow-hidden transition-all duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] lg:order-1 ${
+          expanded ? "max-h-0 opacity-0 lg:-translate-x-10" : "opacity-100"
         }`}
       >
         <Pitch />
