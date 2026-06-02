@@ -177,8 +177,10 @@ Design the best stack for this customer within budget.`;
   });
   } catch (err) {
     console.error("[coach] failed to build stack:", err);
+    // TEMP: surface the real cause to the client for deploy debugging.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     return Response.json(
-      { error: "Coach couldn't build your stack right now. Please try again." },
+      { error: "Coach couldn't build your stack right now. Please try again.", detail },
       { status: 500 },
     );
   }
