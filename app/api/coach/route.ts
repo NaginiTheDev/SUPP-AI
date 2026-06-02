@@ -1,4 +1,4 @@
-import { anthropic } from "@ai-sdk/anthropic";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import {
@@ -53,15 +53,18 @@ export async function POST(req: Request) {
     return Response.json({ error: "Missing goal or budget" }, { status: 400 });
   }
 
-  // Clear, logged failure if the AI key is missing (the usual cause of a 500
-  // on a fresh deploy — set ANTHROPIC_API_KEY in the Vercel project env).
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("[coach] ANTHROPIC_API_KEY is not set in this environment");
+  // Accept the conventional ANTHROPIC_API_KEY or a lowercase `anthropic` var.
+  // Clear, logged failure if neither is set (the usual cause of a 500 on a
+  // fresh deploy — set one of these in the Vercel project env).
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.anthropic;
+  if (!apiKey) {
+    console.error("[coach] No Anthropic API key set (ANTHROPIC_API_KEY or anthropic)");
     return Response.json(
       { error: "The AI coach isn't configured on the server yet (missing API key)." },
       { status: 503 },
     );
   }
+  const anthropic = createAnthropic({ apiKey });
 
   try {
     const candidates = await gatherCandidates(profile.goal, profile.budget);
