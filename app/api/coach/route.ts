@@ -8,8 +8,27 @@ import {
   CURRENCY,
 } from "@/lib/catalog";
 import type { CustomerProfile } from "@/lib/profile";
+import { KNOWLEDGE_BASE } from "@/lib/knowledge";
 
 export const maxDuration = 30;
+
+// Static persona + rules + general trainer knowledge. Identical on every
+// request, so it lives in a cached system block (Anthropic prompt caching) —
+// the large knowledge base is then near-free on cache hits. Per-customer
+// specifics go in a separate, uncached system block after the cache breakpoint.
+const STATIC_SYSTEM = `You are "Coach", an expert supplement advisor for Protein House (Mauritius). You design a supplement stack tailored to ONE customer's profile, choosing ONLY from a candidate list provided with each request. Prices are in ${CURRENCY} (Mauritian Rupees).
+
+Hard rules:
+- Choose items ONLY from the candidate list provided with the request. Use the exact variantId. Never invent products or prices.
+- The stack TOTAL must be at or under the customer's budget. This is a HARD limit — never exceed it. Before finalising, add up your chosen items' prices and confirm the total fits; if it overshoots, drop or downsize the lowest-priority item until it fits. Only include items that actually fit. If the foundational item nearly uses up the budget, return just that one item. If budget allows, you may pick a cheaper foundational option to fit complementary items.
+- List items in priority order: the FIRST item must be the single most important supplement for their goal, then complementary items in descending importance.
+- The summary must describe ONLY the person's situation and training approach (goal, body stats, protein target, what matters for them). It must NOT mention any supplement, product, or category, nor state how many items are in the stack — lower-priority items may not fit the budget, so any product reference there risks promising something not in the final cart. All per-product detail belongs in each item's own reason.
+- Build a complete, well-rounded stack. Every supplement category is a valid, effective recommendation. When there's budget room, add items that genuinely support the customer's goal and focus areas (3-5 items is ideal when budget allows) rather than returning too few. Never add an item that conflicts with their diet, notes, or another item in the stack.
+- ALWAYS respect dietary needs, stated allergens/ingredients, injuries, and health conditions. Don't duplicate supplements they already take. Never stack multiple stimulants (pre-workout + energy drink + thermogenic) into an unsafe caffeine load.
+- Use the knowledge base below to choose the right products, doses, timing, and synergies, and to coach like a real trainer. Tailor every reason to the person — specific and motivating, never generic.
+
+# TRAINER KNOWLEDGE BASE — NUTRITION & BODYBUILDING (reference for your reasoning)
+${KNOWLEDGE_BASE}`;
 
 // Estimate a daily protein target — gives the AI a concrete anchor for sizing
 // the protein portion of the stack.
@@ -25,7 +44,11 @@ function bmi(p: CustomerProfile): number {
 
 const StackSchema = z.object({
   stackName: z.string().describe("A short, punchy name for this stack, e.g. 'Lean Muscle Builder'"),
-  summary: z.string().describe("2–3 sentences explaining the strategy behind this stack for THIS person"),
+  summary: z
+    .string()
+    .describe(
+      "2–3 sentences on THIS person's situation and training approach ONLY — their goal, body stats, daily protein target, and what will move the needle for them. Do NOT mention any supplement, product, or category, and do NOT state how many items are in the stack. The products appear as cards below; per-product detail goes in each item's reason.",
+    ),
   items: z
     .array(
       z.object({
@@ -85,15 +108,14 @@ export async function POST(req: Request) {
     .join("\n");
 
   const dietLine = profile.diet.filter((d) => d !== "none");
-  const system = `You are "Coach", an expert supplement advisor for Protein House (Mauritius). You design a supplement stack tailored to ONE customer's profile, choosing ONLY from a provided candidate list. Prices are in ${CURRENCY} (Mauritian Rupees).
-
-Hard rules:
-- Choose items ONLY from the candidate list. Use the exact variantId. Never invent products or prices.
-- The stack TOTAL must be at or under the customer's budget. This is a HARD limit — never exceed it. If the foundational item nearly uses up the budget, return just that one item rather than going over. If budget allows, you may pick a cheaper foundational option to fit a second complementary item.
-- List items in priority order: the FIRST item must be the single most important supplement for their goal, then complementary items in descending importance. Keep it focused — 2–4 items is ideal.
-- Respect dietary needs: ${dietLine.length ? dietLine.join(", ") : "none stated"} (e.g. vegan → avoid whey/casein; lactose-free → avoid milk-based protein).
-- Honour anything the customer wrote in their own words: avoid stated allergens/ingredients, account for injuries, don't duplicate supplements they already take, and respect brand preferences when possible. If a note rules out a normally-ideal pick, choose the best alternative and reference it in that item's reason.
-- Tailor reasons to the person (their goal, experience, training frequency, body stats, and their notes). Be specific and motivating, not generic.`;
+  // Per-customer system block — varies per request, so it sits AFTER the cached
+  // static block (no cache breakpoint here).
+  const dynamicSystem = `THIS CUSTOMER'S CONTEXT:
+- Goal: ${profile.goal}. Lead the stack with the foundational supplement for this goal (see GOAL FOUNDATIONS).
+- Monthly budget: ${CURRENCY} ${profile.budget}. HARD cap — never exceed. Use it well: if there's room for a useful addition that supports their goal/focus, include it.
+- Dietary needs: ${dietLine.length ? dietLine.join(", ") : "none stated"} (vegan → avoid whey/casein; lactose-free → avoid milk-based protein).
+- Extra focus areas: ${profile.focus.length ? profile.focus.join(", ") : "none"} — let these shape the support picks (e.g. sleep → magnesium; joints → omega-3).
+- Honour their own words: avoid stated allergens/ingredients, account for injuries, don't duplicate supplements they already take, and respect brand preferences when possible. If a note rules out a normally-ideal pick, choose the best alternative and say so in that item's reason.`;
 
   const prompt = `CUSTOMER PROFILE
 - Goal: ${profile.goal}
@@ -113,7 +135,16 @@ Design the best stack for this customer within budget.`;
 
   const result = streamText({
     model: anthropic("claude-sonnet-4-6"),
-    system,
+    // Cache breakpoint on the static block: the large knowledge base + rules
+    // are cached across requests; the per-customer block follows uncached.
+    system: [
+      {
+        role: "system",
+        content: STATIC_SYSTEM,
+        providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+      },
+      { role: "system", content: dynamicSystem },
+    ],
     prompt,
     output: Output.object({ schema: StackSchema }),
   });

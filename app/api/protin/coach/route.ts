@@ -12,8 +12,27 @@ import {
   type GoalKey,
 } from "@/lib/protin/catalog";
 import type { ProtinProfile } from "@/lib/protin/profile";
+import { KNOWLEDGE_BASE } from "@/lib/knowledge";
 
 export const maxDuration = 30;
+
+// Static persona + rules + full domain knowledge base. Identical on every
+// request, so it lives in a cached system block (Anthropic prompt caching) —
+// the large knowledge base is then near-free on cache hits. Per-customer
+// specifics go in a separate, uncached system block after the cache breakpoint.
+const STATIC_SYSTEM = `Þú ert "Þjálfarinn", sérfræðiráðgjafi í fæðubótarefnum fyrir protin.is (íslensk verslun). Þú setur saman sérsniðinn stafla af fæðubótarefnum fyrir EINN viðskiptavin og velur EINGÖNGU úr lista yfir mögulegar vörur sem fylgir hverri beiðni. Öll verð eru í íslenskum krónum (ISK, heilar tölur).
+
+Harðar reglur:
+- Veldu vörur EINGÖNGU af listanum sem fylgir beiðninni. Notaðu nákvæmlega rétt variantId. Aldrei finna upp vörur eða verð.
+- Þegar fjárhagsáætlun er sett VERÐUR heildarverð staflans að vera við eða undir henni. Þetta er HÁRT hámark — farðu aldrei yfir það. Áður en þú lýkur skaltu leggja saman verð valinna vara og staðfesta að heildin passi; ef hún fer yfir skaltu sleppa eða minnka lægst forgangsröðuðu vöruna þar til hún passar. Hafðu aðeins með vörur sem raunverulega passa. Ef grunnvaran nýtir nær alla áætlunina, skilaðu þá bara þeirri einu vöru.
+- Forgangsraðaðu: fyrsta varan (tier=foundational) er mikilvægasta varan fyrir markmiðið; síðan supporting og optional í minnkandi mikilvægisröð.
+- Samantektin (summary) má AÐEINS lýsa stöðu og nálgun einstaklingsins (markmið, líkamsupplýsingar, próteinmarkmið, hvað skiptir máli). Hún má EKKI nefna nein fæðubótarefni, vörur eða vöruflokka, né fjölda vara — lægra forgangsraðaðar vörur gætu ekki passað í áætlunina, svo sérhver vörutilvísun gæti lofað vöru sem endar ekki í körfunni. Allar vöruupplýsingar fara í reason-reit hverrar vöru.
+- Settu saman heildstæðan, vel ávalan stafla. Allir vöruflokkar verslunarinnar eru gildar og áhrifaríkar tillögur. Þegar pláss er í áætluninni skaltu bæta við vörum sem styðja raunverulega við markmið og áherslur viðskiptavinarins (3–5 vörur er kjörið þegar áætlun leyfir) frekar en að skila of fáum. Bættu aldrei við vöru sem stangast á við mataræði, athugasemdir eða aðra vöru í staflanum.
+- Virtu ALLTAF mataræði, uppgefin ofnæmis-/innihaldsefni og heilsufar viðskiptavinarins. Ekki tvítaka efni sem þeir taka nú þegar. Ekki stafla saman mörgum örvandi vörum (pre-workout + orkudrykkur + brennsluefni) þannig að koffínmagn verði óhóflegt.
+- Notaðu þekkingargrunninn hér að neðan til að velja réttar vörur, skammta, tímasetningu og samspil — en ALLUR texti til viðskiptavinarins VERÐUR að vera á góðri, eðlilegri íslensku. Vertu nákvæm/ur, sannfærandi og hvetjandi.
+
+# ÞEKKINGARGRUNNUR — NÆRING & LÍKAMSRÆKT (til viðmiðunar fyrir þína rökhugsun; svaraðu viðskiptavininum á íslensku)
+${KNOWLEDGE_BASE}`;
 
 function bmi(p: ProtinProfile): number {
   const m = p.heightCm / 100;
@@ -34,7 +53,11 @@ const FOCUS_IS: Record<string, string> = {
 
 const StackSchema = z.object({
   stackName: z.string().describe("Stutt, hvetjandi nafn á staflanum á íslensku"),
-  summary: z.string().describe("2–3 setningar á íslensku um stefnuna á bak við þennan stafla fyrir ÞENNAN einstakling"),
+  summary: z
+    .string()
+    .describe(
+      "2–3 setningar á íslensku um stöðu og nálgun ÞESSA einstaklings EINGÖNGU — markmið, líkamsupplýsingar, daglegt próteinmarkmið og hvað skiptir mestu fyrir hann/hana. EKKI nefna nein fæðubótarefni, vörur eða vöruflokka, og EKKI tilgreina fjölda vara. Vörurnar birtast sem spjöld fyrir neðan; nánari upplýsingar um hverja vöru fara í reason-reit hennar.",
+    ),
   items: z
     .array(
       z.object({
@@ -74,17 +97,14 @@ export async function POST(req: Request) {
     const focusLine = profile.focus?.length ? profile.focus.map((f) => FOCUS_IS[f] ?? f).join(", ") : "engin";
     const budgetLine = noLimit ? "engin takmörk" : formatISK(profile.budgetISK);
 
-    const system = `Þú ert "Þjálfarinn", sérfræðiráðgjafi í fæðubótarefnum fyrir protin.is (íslensk verslun). Þú setur saman sérsniðinn stafla af fæðubótarefnum fyrir EINN viðskiptavin og velur EINGÖNGU úr meðfylgjandi lista yfir mögulegar vörur. Öll verð eru í íslenskum krónum (ISK, heilar tölur).
-
-Harðar reglur:
-- Veldu vörur EINGÖNGU af listanum. Notaðu nákvæmlega rétt variantId. Aldrei finna upp vörur eða verð.
-- ${noLimit ? "Engin fjárhagsáætlun er sett, en haltu staflanum samt hnitmiðuðum og skynsamlegum." : "Heildarverð staflans VERÐUR að vera við eða undir mánaðarlegri fjárhagsáætlun viðskiptavinarins. Þetta er HÁRT hámark — farðu aldrei yfir það. Ef grunnvaran nýtir nær alla áætlunina, skilaðu þá bara þeirri einu vöru."}
-- Forgangsraðaðu: fyrsta varan (tier=foundational) er mikilvægasta varan fyrir markmiðið; síðan supporting og optional í minnkandi mikilvægisröð. Haltu þessu hnitmiðuðu — 2–4 vörur er kjörið.
-- FAGLEG LEIÐSÖGN fyrir þetta markmið: ${GOAL_GUIDANCE[profile.goal as GoalKey] ?? GOAL_GUIDANCE.almenn_heilsa}
-- Nýttu fjárhagsáætlunina vel: ef pláss er í áætluninni fyrir augljóslega gagnlega viðbótarvöru skaltu bæta henni við frekar en að skila of fáum vörum. Ekki samt bæta við ónauðsynlegum vörum bara til að fylla upp í áætlunina.
-- Virtu mataræði viðskiptavinarins: ${dietLine} (t.d. vegan → forðastu mysuprótein/kasein; laktósafrítt → forðastu mjólkurprótein).
-- Taktu tillit til þess sem viðskiptavinurinn skrifar með eigin orðum: forðastu uppgefin ofnæmis-/innihaldsefni, taktu mið af meiðslum, ekki tvítaka efni sem þeir taka nú þegar.
-- Sníddu rökstuðning að einstaklingnum. Vertu nákvæm/ur og hvetjandi. ALLUR texti VERÐUR að vera á góðri, eðlilegri íslensku.`;
+    // Per-customer system block — varies per request, so it sits AFTER the cached
+    // static block (no cache breakpoint here).
+    const dynamicSystem = `AÐSTÆÐUR ÞESSA VIÐSKIPTAVINAR:
+- Markmið núna: ${GOAL_LABELS[profile.goal as GoalKey] ?? profile.goal}. Fagleg leiðsögn: ${GOAL_GUIDANCE[profile.goal as GoalKey] ?? GOAL_GUIDANCE.almenn_heilsa}
+- Fjárhagsáætlun: ${noLimit ? "engin sett — haltu staflanum samt skynsamlegum og vel ávöluðum." : `${budgetLine} á mánuði. HÁRT hámark — farðu aldrei yfir. Nýttu hana vel: ef pláss er fyrir gagnlega viðbótarvöru sem styður markmiðið/áherslurnar skaltu bæta henni við.`}
+- Mataræði: ${dietLine} (vegan → forðastu mysu/kasein; laktósafrítt → forðastu mjólkurprótein).
+- Áhersluatriði: ${focusLine} — láttu þau hafa áhrif á stuðningsvörurnar (t.d. svefn → magnesíum; liðamót → omega-3).
+- Taktu tillit til eigin orða viðskiptavinarins: forðastu uppgefin ofnæmis-/innihaldsefni, taktu mið af meiðslum, ekki tvítaka efni sem þeir taka nú þegar.`;
 
     const prompt = `SNIÐ VIÐSKIPTAVINAR
 - Markmið: ${GOAL_LABELS[profile.goal as GoalKey] ?? profile.goal}
@@ -104,7 +124,16 @@ Settu saman besta staflann fyrir þennan viðskiptavin${noLimit ? "" : " innan f
 
     const result = streamText({
       model: anthropic("claude-sonnet-4-6"),
-      system,
+      // Cache breakpoint on the static block: the large knowledge base + rules
+      // are cached across requests; the per-customer block follows uncached.
+      system: [
+        {
+          role: "system",
+          content: STATIC_SYSTEM,
+          providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+        },
+        { role: "system", content: dynamicSystem },
+      ],
       prompt,
       output: Output.object({ schema: StackSchema }),
     });
